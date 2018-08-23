@@ -4,7 +4,6 @@ import (
 	"github.com/google/gopacket/pcap"
 	"flag"
 	"github.com/google/gopacket"
-	"net"
 	"fmt"
 	"github.com/google/gopacket/layers"
 	"time"
@@ -14,31 +13,46 @@ import (
 
 var verbose = false
 
+type question struct {
+	Name  string
+	Type  string
+	Class string
+}
+type resourceRecord struct {
+	// Header
+	Name  string
+	Type  string
+	Class string
+	TTL   uint32
+
+	// RDATA Raw Values
+	DataLength uint16
+	Data       string
+
+	// RDATA Decoded Values
+	IP             string
+	NS, CNAME, PTR string
+	TXTs           []string
+	SOA            string
+	SRV            string
+	MX             string
+
+	// Undecoded TXT for backward compatibility
+	TXT string
+}
 type DNSQuery struct {
-	SrcIP, DstIP gopacket.Endpoint
-	SrcPort, DstPort gopacket.Endpoint
+	SrcIP, DstIP string
+	SrcPort, DstPort string
 	Request      bool
-	Query        []layers.DNSQuestion
+	Query        []question
 	Timestamp    time.Time
 }
 
 type QA struct {
 	Question *DNSQuery
-	Answer *layers.DNS
+	Answer []resourceRecord
 	Time time.Duration
 }
-
-type DNSAnswer struct {
-	Answer       string
-	Query        string
-	SrcIP, DstIP net.IP
-	Request      bool
-	Timestamp    int64
-	Type         string
-	TTL          uint32
-}
-
-
 
 var buf = struct {
 	data map[string]DNSQuery
@@ -47,8 +61,10 @@ var buf = struct {
 
 func main() {
 
-	var filter *string = flag.String("f", "udp and port 53", "filter same as tcpdump")
-	var eth *string = flag.String("i", "eth0", "Interface to sniff")
+	var filter = flag.String("f", "udp and port 53", "filter same as tcpdump")
+	var eth    = flag.String("i", "eth0", "Interface to sniff")
+	verbose = *flag.Bool("v", false, "Print debuginfo")
+
 	flag.Parse()
 
 	packets := make(chan gopacket.Packet)
@@ -72,12 +88,12 @@ func deal(packets chan gopacket.Packet) {
 		nlayer := packet.NetworkLayer()
 		assertNotNil(nlayer, "parse network layer fail")
 		src, dst := nlayer.NetworkFlow().Endpoints()
-		fmt.Println(src.String(), dst.String())
+		debug(src.String(), dst.String())
 
 		tlayer := packet.TransportLayer()
 		assertNotNil(tlayer, "parse transport layer fail")
 		srcPort, dstPort := tlayer.TransportFlow().Endpoints()
-		fmt.Println(srcPort.String(), dstPort.String())
+		debug(srcPort.String(), dstPort.String())
 
 		dnslayer := packet.Layer(layers.LayerTypeDNS)
 		assertNotNil(dnslayer, "parse dns layer fail")
@@ -90,12 +106,13 @@ func deal(packets chan gopacket.Packet) {
 		if ! dns.QR {
 			transId = fmt.Sprintf("%s:%s,%s:%s,%d", src.String(), srcPort.String(), dst.String(), dstPort.String(), id)
 			debug(transId)
+			questions := convertQuestion(dns.Questions)
 			dnsQuery := DNSQuery{
-				SrcIP: src,
-				DstIP: dst,
-				SrcPort: srcPort,
-				DstPort: dstPort,
-				Query: dns.Questions,
+				SrcIP: src.String(),
+				DstIP: dst.String(),
+				SrcPort: srcPort.String(),
+				DstPort: dstPort.String(),
+				Query: questions,
 				Timestamp: time.Now(),
 
 			}
@@ -111,9 +128,10 @@ func deal(packets chan gopacket.Packet) {
 		}
 		debug(dnsQuery.Query)
 		debug(dns.Answers)
+		records := convertAnswer(dns.Answers)
 		output, err := json.Marshal(&QA{
 			Question: &dnsQuery,
-			Answer: dns,
+			Answer: records,
 			Time: time.Now().Sub(dnsQuery.Timestamp),
 		})
 		assertNil(err)
@@ -121,6 +139,42 @@ func deal(packets chan gopacket.Packet) {
 	}
 }
 
+func convertQuestion(Questions []layers.DNSQuestion) []question {
+	questions := []question{}
+	for _,item := range Questions {
+		q := question{
+			Name: string(item.Name),
+			Type: item.Type.String(),
+			Class: item.Class.String(),
+		}
+		questions = append(questions, q)
+	}
+	return questions
+}
+func convertAnswer(answers []layers.DNSResourceRecord)[]resourceRecord {
+	records := []resourceRecord{}
+	for _, item := range answers {
+		r := resourceRecord{
+			Name: string(item.Name),
+			Type: item.Type.String(),
+			Class: item.Class.String(),
+			TTL: item.TTL,
+			DataLength: item.DataLength,
+			Data: string(item.Data),
+			IP: item.IP.String(),
+			NS: string(item.NS),
+			CNAME: string(item.CNAME),
+			PTR: string(item.PTR),
+			// todo : SOA SRV MX not convert
+			TXT: string(item.TXT),
+		}
+		for _, s := range item.TXTs {
+			r.TXTs =  append(r.TXTs, string(s))
+		}
+		records = append(records, r)
+	}
+	return records
+}
 
 func assertNil(o interface{}) {
 	if o != nil {
